@@ -9,6 +9,21 @@ machin-serve — http://0.0.0.0:8080/
   auth: disabled
 ```
 
+## Install
+
+```bash
+curl -fsSL https://github.com/javimosch/machin-serve/releases/latest/download/serve -o serve && chmod +x serve
+sudo mv serve /usr/local/bin/
+```
+
+Or build from source (requires [machin](https://github.com/javimosch/machin) + C compiler):
+
+```bash
+git clone https://github.com/javimosch/machin-serve.git
+cd machin-serve
+./build.sh
+```
+
 ## Usage
 
 ```bash
