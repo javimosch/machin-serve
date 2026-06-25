@@ -1,0 +1,201 @@
+// machin-serve — a static file HTTP server in machin (MFL).
+// Single native binary, no dependencies.
+//
+// Usage:
+//   serve                         # port 8080, dir .
+//   serve -p 9090                 # custom port
+//   serve -d /var/www             # custom directory
+//   serve -u admin:secret         # with basic auth
+//   serve -p 9090 -d /www -u a:s  # all options
+//   serve -h                      # show help
+
+// ---- ANSI helpers ----
+
+func esc() (s) { s = bytes_str(from_hex("1b")) }
+func col(n) (s) { s = esc() + "[" + str(n) + "m" }
+func rst() (s) { s = esc() + "[0m" }
+func bold() (s) { s = esc() + "[1m" }
+
+// ---- MIME types ----
+
+func mime_type(path) (t) {
+    if has_suffix(path, ".html") || has_suffix(path, ".htm") { return "text/html; charset=utf-8" }
+    if has_suffix(path, ".css") { return "text/css; charset=utf-8" }
+    if has_suffix(path, ".js") { return "application/javascript" }
+    if has_suffix(path, ".json") { return "application/json" }
+    if has_suffix(path, ".png") { return "image/png" }
+    if has_suffix(path, ".jpg") || has_suffix(path, ".jpeg") { return "image/jpeg" }
+    if has_suffix(path, ".gif") { return "image/gif" }
+    if has_suffix(path, ".webp") { return "image/webp" }
+    if has_suffix(path, ".svg") { return "image/svg+xml" }
+    if has_suffix(path, ".ico") { return "image/x-icon" }
+    if has_suffix(path, ".txt") { return "text/plain; charset=utf-8" }
+    if has_suffix(path, ".pdf") { return "application/pdf" }
+    if has_suffix(path, ".zip") { return "application/zip" }
+    if has_suffix(path, ".md") { return "text/markdown; charset=utf-8" }
+    if has_suffix(path, ".xml") { return "application/xml" }
+    if has_suffix(path, ".wasm") { return "application/wasm" }
+    return "application/octet-stream"
+}
+
+// ---- HTTP response builders ----
+
+func ok(body, ctype) (s) {
+    s = "HTTP/1.1 200 OK\r\nContent-Type: " + ctype + "\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body
+}
+
+func not_found() (s) {
+    body := "404 Not Found"
+    s = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body
+}
+
+func unauthorized() (s) {
+    body := "401 Unauthorized"
+    s = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"machin-serve\"\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body
+}
+
+// ---- connection handler ----
+
+func handle(conn, dir, auth) {
+    req := read(conn)
+
+    // Parse request path from "GET /path HTTP/1.1"
+    path := "/"
+    m := regex_groups(req, "^GET ([^ ]+) HTTP")
+    if len(m) > 1 { path = m[1] }
+
+    // Check basic auth if configured
+    if len(auth) > 0 {
+        am := regex_groups(req, "Authorization: Basic ([^\r\n]+)")
+        authed := false
+        if len(am) > 1 {
+            decoded := base64_decode(am[1])
+            if decoded == auth { authed = true }
+        }
+        if authed == false {
+            write(conn, unauthorized())
+            close(conn)
+            return
+        }
+    }
+
+    // URL-decode the path
+    path = url_decode(path)
+
+    // Reject path traversal (..)
+    if contains(path, "..") {
+        write(conn, not_found())
+        close(conn)
+        return
+    }
+
+    // Build filesystem path
+    fpath := dir
+    if path == "/" {
+        fpath = dir + "/index.html"
+    } else {
+        // Strip leading slash from path and append to dir
+        p := path
+        if charat(p, 0) == "/" {
+            p = substr(p, 1, len(p))
+        }
+        fpath = dir + "/" + p
+    }
+
+    // Check if path is a directory (list_dir returns non-empty for dirs)
+    entries := list_dir(fpath)
+    if len(entries) > 0 {
+        // It's a directory — try serving index.html from it
+        dirpath := fpath
+        if charat(dirpath, len(dirpath)-1) != "/" {
+            dirpath = dirpath + "/"
+        }
+        fpath = dirpath + "index.html"
+        body := read_file(fpath)
+        if len(body) > 0 {
+            write(conn, ok(body, mime_type(fpath)))
+        } else {
+            write(conn, not_found())
+        }
+        close(conn)
+        return
+    }
+
+    // Read and serve the file (safe: list_dir returned empty, so it's not a dir)
+    body := read_file(fpath)
+    if len(body) > 0 {
+        ctype := mime_type(fpath)
+        write(conn, ok(body, ctype))
+    } else {
+        write(conn, not_found())
+    }
+    close(conn)
+}
+
+// ---- main ----
+
+func main() {
+    port := 8080
+    dir := "."
+    auth := ""
+
+    // Simple flag parsing
+    a := args()
+    i := 1
+    n := len(a)
+    while i < n {
+        arg := a[i]
+        if arg == "-p" || arg == "--port" {
+            if i + 1 < n {
+                v := parse_int(a[i+1])
+                if v > 0 && v < 65536 { port = v }
+                i = i + 1
+            }
+        } else if arg == "-d" || arg == "--dir" {
+            if i + 1 < n {
+                dir = a[i+1]
+                i = i + 1
+            }
+        } else if arg == "-u" || arg == "--user" {
+            if i + 1 < n {
+                auth = a[i+1]
+                i = i + 1
+            }
+        } else if arg == "-h" || arg == "--help" {
+            println("machin-serve — static file HTTP server")
+            println("")
+            println("Usage: serve [-p PORT] [-d DIR] [-u USER:PASS]")
+            println("")
+            println("  -p, --port PORT   port to listen on (default 8080)")
+            println("  -d, --dir  DIR    directory to serve (default .)")
+            println("  -u, --user USER:PASS  basic auth credentials")
+            println("  -h, --help        show this help")
+            return
+        }
+        i = i + 1
+    }
+
+    // Remove trailing slash from dir (if present and dir is longer than 1)
+    if len(dir) > 1 && charat(dir, len(dir)-1) == "/" {
+        dir = substr(dir, 0, len(dir)-1)
+    }
+
+    println(bold() + col(92) + "machin-serve" + rst() + " — http://0.0.0.0:" + str(port) + "/")
+    println("  serving: " + dir)
+    if len(auth) > 0 {
+        println(col(93) + "  auth: enabled" + rst())
+    } else {
+        println(col(90) + "  auth: disabled" + rst())
+    }
+
+    server := listen(port)
+    if server == -1 {
+        println("error: could not listen on port " + str(port))
+        exit(1)
+    }
+
+    for {
+        conn := accept(server)
+        go handle(conn, dir, auth)
+    }
+}
